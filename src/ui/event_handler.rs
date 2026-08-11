@@ -393,7 +393,7 @@ fn disconnect_app(app: &InstalledApp) {
         send_json(
             addr,
             pkg,
-            json!({ "type": "SF_CLOSE_BRIDGE", "data": {} }),
+            json!({ "type": "SF_CLOSE_BRIDGE", "status": "OK", "data": {} }),
         );
         // 先置为 Disconnected（ACK 到达时会再次确认），UI 立即响应断开
         state::set_connection_status(addr, pkg, AppConnectionStatus::Disconnected);
@@ -611,6 +611,7 @@ fn run_sse(
                     &pkg_inner,
                     json!({
                         "type": "SF_SSE_EVENT",
+                        "status": "OK",
                         "data": {
                             "id": id_inner,
                             "event": if event.is_empty() { "message" } else { event },
@@ -630,7 +631,7 @@ fn run_sse(
                 send_json(
                     &addr,
                     &pkg,
-                    json!({ "type": "SF_SSE_END", "data": { "id": id } }),
+                    json!({ "type": "SF_SSE_END", "status": "OK", "data": { "id": id } }),
                 );
                 state::record_result(&addr, &pkg, true, Some("SSE完成".into()));
             }
@@ -639,7 +640,7 @@ fn run_sse(
                     send_json(
                         &addr,
                         &pkg,
-                        json!({ "type": "SF_SSE_END", "data": { "id": id } }),
+                        json!({ "type": "SF_SSE_END", "status": "OK", "data": { "id": id } }),
                     );
                 } else {
                     tracing::error!("SSE错误: {}", e);
@@ -650,7 +651,7 @@ fn run_sse(
                         json!({
                             "type": "SF_SSE_ERROR",
                             "status": e,
-                            "data": { "id": id, "error": e }
+                            "data": { "id": id }
                         }),
                     );
                 }
@@ -912,7 +913,7 @@ fn check_heartbeat_timeout() {
         send_json(
             &addr,
             &pkg,
-            json!({ "type": "SF_CLOSE_BRIDGE", "data": {} }),
+            json!({ "type": "SF_CLOSE_BRIDGE", "status": "OK", "data": {} }),
         );
         state::set_connection_status(&addr, &pkg, AppConnectionStatus::Disconnected);
         state::persist_now();
