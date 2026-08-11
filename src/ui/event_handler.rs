@@ -225,8 +225,8 @@ fn handle_sf_request(addr: &str, pkg: &str, data: Value) {
     let pkg = pkg.to_string();
 
     if is_sse {
-        // SSE 流式请求：spawn 避免长时间阻塞事件分发
-        spawn_sse(addr, pkg, id, method, url, headers, body_bytes, timeout_ms);
+        // SSE 流式请求：后台 spawn，避免长时间阻塞事件分发
+        run_sse(addr, pkg, id, method, url, headers, body_bytes, timeout_ms);
     } else {
         // 普通请求：同步执行并回送响应（与参考插件一致，
         // execute_request 内部的 WASI 阻塞读取会自行等待并驱动回调）
@@ -369,7 +369,12 @@ fn send_error(addr: &str, pkg: &str, id: &str, status_code: u16, error: &str) {
 
 // ========== SSE 流式请求 ==========
 
-fn spawn_sse(
+/// 启动 SSE 流式请求。
+///
+/// 使用 `wit_bindgen::spawn` 在后台运行：导出执行器会持续轮询所有 spawn 任务
+/// 及其等待的 waitable，直到全部完成（而非根 future 一结束就销毁任务）。
+/// 因此长连接 SSE 不会阻塞 `on_event`，心跳（PING/PONG）和其他请求可并发处理。
+fn run_sse(
     addr: String,
     pkg: String,
     id: String,
@@ -379,17 +384,17 @@ fn spawn_sse(
     body: Option<Vec<u8>>,
     timeout_ms: u32,
 ) {
-    // 注册取消标志
+    // 注册取消标志：SF_CLOSE 到达时由另一个事件置位
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let mut cancels = sse_cancels().lock().unwrap_or_else(|p| p.into_inner());
         cancels.insert(id.clone(), cancel.clone());
     }
 
-    let cancel_check = cancel.clone();
-    let id_for_task = id.clone();
-    let addr_task = addr.clone();
-    let pkg_task = pkg.clone();
+    let cancel_read = cancel.clone();
+    let id_inner = id.clone();
+    let addr_inner = addr.clone();
+    let pkg_inner = pkg.clone();
 
     wit_bindgen::spawn(async move {
         let result = api_client::execute_sse(
@@ -399,66 +404,64 @@ fn spawn_sse(
             body.as_deref(),
             timeout_ms,
             &mut |event, data| {
-                // 每个事件转发为 SF_SSE_EVENT
                 send_json(
-                    &addr_task,
-                    &pkg_task,
+                    &addr_inner,
+                    &pkg_inner,
                     json!({
                         "type": "SF_SSE_EVENT",
                         "data": {
-                            "id": id_for_task,
+                            "id": id_inner,
                             "event": if event.is_empty() { "message" } else { event },
                             "data": data
                         }
                     }),
                 );
-                // 检查是否被取消
-                !cancel_check.load(Ordering::SeqCst)
+                // 返回 false 中止流
+                !cancel_read.load(Ordering::SeqCst)
             },
-            &|| cancel_check.load(Ordering::SeqCst),
+            &|| cancel_read.load(Ordering::SeqCst),
         );
 
         // 清理取消标志
         {
             let mut cancels = sse_cancels().lock().unwrap_or_else(|p| p.into_inner());
-            cancels.remove(&id_for_task);
+            cancels.remove(&id_inner);
         }
 
         match result {
             Ok(()) => {
-                // 流正常结束
                 send_json(
-                    &addr_task,
-                    &pkg_task,
+                    &addr,
+                    &pkg,
                     json!({
                         "type": "SF_SSE_END",
-                        "data": { "id": id_for_task }
+                        "data": { "id": id }
                     }),
                 );
-                state::record_result(&pkg_task, true, Some("SSE完成".to_string()));
+                state::record_result(&pkg, true, Some("SSE完成".to_string()));
             }
             Err(e) => {
                 if cancel.load(Ordering::SeqCst) {
-                    // 被主动取消，也发送 END
+                    // 被 SF_CLOSE 主动取消，发送 END
                     send_json(
-                        &addr_task,
-                        &pkg_task,
+                        &addr,
+                        &pkg,
                         json!({
                             "type": "SF_SSE_END",
-                            "data": { "id": id_for_task }
+                            "data": { "id": id }
                         }),
                     );
                 } else {
                     tracing::error!("SSE错误: {}", e);
-                    state::record_result(&pkg_task, false, Some(e.clone()));
+                    state::record_result(&pkg, false, Some(e.clone()));
                     send_json(
-                        &addr_task,
-                        &pkg_task,
+                        &addr,
+                        &pkg,
                         json!({
                             "type": "SF_SSE_ERROR",
                             "status": e,
                             "data": {
-                                "id": id_for_task,
+                                "id": id,
                                 "error": e
                             }
                         }),
@@ -471,7 +474,7 @@ fn spawn_sse(
     });
 }
 
-/// 取消指定 SSE 流
+/// 取消指定 SSE 流（由 SF_CLOSE 触发）
 fn cancel_sse(id: &str) {
     let cancels = sse_cancels().lock().unwrap_or_else(|p| p.into_inner());
     if let Some(flag) = cancels.get(id) {
