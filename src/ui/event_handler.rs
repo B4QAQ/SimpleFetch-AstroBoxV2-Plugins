@@ -568,7 +568,7 @@ fn run_sse(
                     );
                 } else {
                     tracing::error!("SSE错误: {}", e);
-                    state::record_result(&pkg, &addr, false, Some(e.clone()));
+                    state::record_result(&addr, &pkg, false, Some(e.clone()));
                     send_json(
                         &addr,
                         &pkg,

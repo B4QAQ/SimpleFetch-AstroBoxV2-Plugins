@@ -1,6 +1,6 @@
 /// 设备图标（手表/手环）
 pub fn device_svg() -> String {
-    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><rect x="80" y="24" width="96" height="208" rx="24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="64" x2="176" y2="64" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="192" x2="176" y2="192" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="112" y1="24" x2="112" y2="8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="144" y1="24" x2="144" y2="8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></svg>"#.to_string()
+    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path d="M853.33 512c0-106.67-51.2-204.8-128-268.8L682.67 0 341.33 0l-42.66 243.2C221.87 307.2 170.67 405.33 170.67 512s51.2 204.8 128 268.8L341.33 1024l341.34 0 42.66-243.2C802.13 716.8 853.33 618.67 853.33 512zM256 512c0-140.8 115.2-256 256-256 140.8 0 256 115.2 256 256s-115.2 256-256 256C371.2 768 256 652.8 256 512z" fill="currentColor"/></svg>"#.to_string()
 }
 
 /// 蓝牙图标

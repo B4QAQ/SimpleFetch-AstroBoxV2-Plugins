@@ -333,20 +333,18 @@ fn app_row(app: &InstalledApp, idx: usize) -> ui::Element {
         .size(12)
         .text_color(COLOR_TEXT_MUTED);
 
-    // 第一行：圆点 + 名称
+    // 第一行：名称（圆点移到卡片行级，相对整张卡片垂直居中）
     let row1 = ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Row)
         .align_center()
         .gap(8)
-        .child(dot)
         .child(name_el);
 
-    // 第二行：包名（缩进对齐圆点后的文字）
+    // 第二行：包名
     let row2 = ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Row)
-        .padding_left(16)
         .child(pkg_el);
 
     // 左侧信息列
@@ -408,6 +406,7 @@ fn app_row(app: &InstalledApp, idx: usize) -> ui::Element {
         .justify_end()
         .child(button);
 
+    // 圆点作为卡片行的直接子元素，配合 align_center 相对整张卡片（含展开信息）垂直居中
     ui::Element::new(ui::ElementType::Div, None)
         .flex()
         .flex_direction(ui::FlexDirection::Row)
@@ -417,6 +416,7 @@ fn app_row(app: &InstalledApp, idx: usize) -> ui::Element {
         .radius(12)
         .padding(12)
         .gap(12)
+        .child(dot)
         .child(info_col)
         .child(action_col)
 }

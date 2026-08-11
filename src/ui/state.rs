@@ -330,33 +330,34 @@ pub fn restore_from_disk(config: persist::OnDiskConfig) {
 }
 
 /// 生成待持久化的应用列表（当前已连接或有统计的应用，按包名聚合）
-fn snapshot_persisted_apps() -> Vec<PersistedApp> {
-    with_state(|s| {
-        let mut by_pkg: HashMap<String, PersistedApp> = HashMap::new();
-        for ((_addr, pkg), conn) in &s.connections {
-            let entry = by_pkg.entry(pkg.clone()).or_insert(PersistedApp {
-                pkg_name: pkg.clone(),
-                was_connected: false,
-                request_count: 0,
-                success_count: 0,
-                error_count: 0,
-            });
-            entry.request_count += conn.request_count;
-            entry.success_count += conn.success_count;
-            entry.error_count += conn.error_count;
-            if conn.status == AppConnectionStatus::Connected {
-                entry.was_connected = true;
-            }
+fn snapshot_persisted_apps(s: &PluginState) -> Vec<PersistedApp> {
+    let mut by_pkg: HashMap<String, PersistedApp> = HashMap::new();
+    for ((_addr, pkg), conn) in &s.connections {
+        let entry = by_pkg.entry(pkg.clone()).or_insert(PersistedApp {
+            pkg_name: pkg.clone(),
+            was_connected: false,
+            request_count: 0,
+            success_count: 0,
+            error_count: 0,
+        });
+        entry.request_count += conn.request_count;
+        entry.success_count += conn.success_count;
+        entry.error_count += conn.error_count;
+        if conn.status == AppConnectionStatus::Connected {
+            entry.was_connected = true;
         }
-        by_pkg.into_values().collect()
-    })
+    }
+    by_pkg.into_values().collect()
 }
 
 pub fn persist_now() {
-    let (auto_reconnect, apps) = with_state(|s| (s.auto_reconnect, snapshot_persisted_apps()));
-    persist::save_config(&persist::OnDiskConfig {
-        version: persist::CURRENT_VERSION,
-        auto_reconnect,
-        apps,
+    let config = with_state(|s| {
+        let apps = snapshot_persisted_apps(s);
+        persist::OnDiskConfig {
+            version: persist::CURRENT_VERSION,
+            auto_reconnect: s.auto_reconnect,
+            apps,
+        }
     });
+    persist::save_config(&config);
 }
