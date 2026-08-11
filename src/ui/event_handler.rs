@@ -24,7 +24,6 @@ pub const TAB_ABOUT_EVENT: &str = "tab_about";
 pub const EVENT_REFRESH_DEVICES: &str = "action:devices.refresh";
 pub const APP_CONNECT_PREFIX: &str = "app:connect:";
 pub const APP_DISCONNECT_PREFIX: &str = "app:disconnect:";
-pub const TOGGLE_AUTO_RECONNECT_EVENT: &str = "toggle:auto_reconnect";
 pub const OPEN_HELP_DOC_EVENT: &str = "open_help_doc";
 pub const OPEN_QQ_GROUP_EVENT: &str = "open_qq_group";
 
@@ -673,25 +672,13 @@ fn cancel_sse(id: &str) {
 
 // ========== 设备/应用管理 ==========
 
-/// 启动时初始刷新 + 自动重连
+/// 启动时初始刷新：填充设备/应用缓存，并启动心跳检测定时器
 pub fn initial_refresh() {
     refresh_connected_devices();
     refresh_installed_apps();
-    for pkg in state::reconnect_packages() {
-        register_for_all_devices(&pkg);
-    }
 
     // 启动心跳检测定时器
     start_heartbeat_timer();
-
-    // 自动重连上次连接的应用
-    if state::auto_reconnect() {
-        let reconnect = state::reconnect_packages();
-        if !reconnect.is_empty() {
-            tracing::info!("自动重连 {} 个上次连接的应用", reconnect.len());
-            auto_reconnect_apps(&reconnect);
-        }
-    }
 }
 
 /// 启动心跳检测 interval（每 3 秒检查一次）
@@ -701,63 +688,6 @@ fn start_heartbeat_timer() {
         let id = timer::set_interval(HEARTBEAT_INTERVAL_MS, &payload).await;
         state::set_heartbeat_timer(id);
     });
-}
-
-/// 自动重连：先启动所有应用，统一等待后批量握手
-fn auto_reconnect_apps(packages: &[String]) {
-    let installed = state::installed_apps();
-    let targets: Vec<InstalledApp> = installed
-        .into_iter()
-        .filter(|a| packages.contains(&a.package_name))
-        .collect();
-
-    if targets.is_empty() {
-        return;
-    }
-
-    // 标记为握手中并启动
-    for app in &targets {
-        state::set_connection_status(&app.addr, &app.package_name, AppConnectionStatus::Handshaking);
-    }
-    crate::ui::build::render_without_auto_refresh();
-
-    wit_bindgen::block_on(async move {
-        for app in &targets {
-            let _ = register::register_interconnect_recv(&app.addr, &app.package_name).await;
-            let app_info = thirdpartyapp::AppInfo {
-                package_name: app.package_name.clone(),
-                fingerprint: Vec::new(),
-                version_code: app.version_code,
-                can_remove: true,
-                app_name: app.app_name.clone(),
-            };
-            let _ = thirdpartyapp::launch_qa(&app.addr, &app_info, "/index").await;
-        }
-        // 统一等待就绪
-        std::thread::sleep(Duration::from_millis(LAUNCH_READY_WAIT_MS));
-
-        for app in &targets {
-            send_json(
-                &app.addr,
-                &app.package_name,
-                json!({ "type": "SF_HANDSHAKE", "data": {} }),
-            );
-            let payload = json!({
-                "kind": HS_TIMEOUT_KIND,
-                "addr": app.addr,
-                "pkg": app.package_name
-            })
-            .to_string();
-            let timer_id = timer::set_timeout(HANDSHAKE_TIMEOUT_MS, &payload).await;
-            if let Some(old) =
-                state::insert_pending_handshake(&app.addr, &app.package_name, timer_id)
-            {
-                clear_timer(old);
-            }
-        }
-    });
-
-    crate::ui::build::render_without_auto_refresh();
 }
 
 /// 自动刷新（节流）
@@ -848,20 +778,6 @@ fn refresh_installed_apps() {
     state::prune_stale_connections();
 }
 
-fn register_for_all_devices(pkg_name: &str) -> usize {
-    let devices = state::connected_devices();
-    let mut ok = 0;
-    for (addr, _) in devices {
-        let pkg = pkg_name.to_string();
-        let result = wit_bindgen::block_on(async move {
-            register::register_interconnect_recv(&addr, &pkg).await
-        });
-        if result.is_ok() {
-            ok += 1;
-        }
-    }
-    ok
-}
 
 fn clear_timer(timer_id: u64) {
     wit_bindgen::block_on(async move {
@@ -928,7 +844,7 @@ fn check_heartbeat_timeout() {
 pub fn ui_event_processor(
     _event_type: crate::exports::astrobox::psys_plugin::event_v3::Event,
     event_id: &str,
-    event_payload: &str,
+    _event_payload: &str,
 ) {
     tracing::info!("UI事件: id={}", event_id);
 
@@ -956,11 +872,6 @@ pub fn ui_event_processor(
         TAB_CONNECT_EVENT => switch_tab(MainTab::Connect),
         TAB_ABOUT_EVENT => switch_tab(MainTab::About),
         EVENT_REFRESH_DEVICES => refresh_device_list(),
-        TOGGLE_AUTO_RECONNECT_EVENT => {
-            let enabled = parse_checked(event_payload);
-            state::set_auto_reconnect(enabled);
-            crate::ui::build::render_without_auto_refresh();
-        }
         OPEN_HELP_DOC_EVENT => {
             dialog::open_url("https://docs.b4qaq.cn/docs/simplefetch");
         }
@@ -1045,15 +956,6 @@ fn send_json(addr: &str, pkg_name: &str, message: Value) {
             e
         );
     }
-}
-
-fn parse_checked(payload: &str) -> bool {
-    if let Ok(json) = serde_json::from_str::<Value>(payload) {
-        if let Some(checked) = json.get("checked").and_then(|v| v.as_bool()) {
-            return checked;
-        }
-    }
-    true
 }
 
 fn show_alert(title: &str, message: &str) {

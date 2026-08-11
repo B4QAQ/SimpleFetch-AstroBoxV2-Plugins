@@ -7,27 +7,19 @@ use crate::ui::state::PersistedApp;
 
 /// 持久化配置文件路径
 const CONFIG_PATH: &str = "./simplefetch.config.json";
-pub const CURRENT_VERSION: u32 = 2;
+pub const CURRENT_VERSION: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OnDiskConfig {
     pub version: u32,
-    /// 启动时是否自动重连上次连接的应用
-    #[serde(default = "default_auto_reconnect")]
-    pub auto_reconnect: bool,
     #[serde(default)]
     pub apps: Vec<PersistedApp>,
-}
-
-fn default_auto_reconnect() -> bool {
-    true
 }
 
 impl Default for OnDiskConfig {
     fn default() -> Self {
         Self {
             version: CURRENT_VERSION,
-            auto_reconnect: true,
             apps: Vec::new(),
         }
     }
@@ -51,11 +43,7 @@ pub fn load_config() -> OnDiskConfig {
 
     match serde_json::from_str::<OnDiskConfig>(&text) {
         Ok(c) => {
-            tracing::info!(
-                "persist: loaded config (auto_reconnect={}, apps={})",
-                c.auto_reconnect,
-                c.apps.len()
-            );
+            tracing::info!("persist: loaded config ({} apps)", c.apps.len());
             c
         }
         Err(err) => {

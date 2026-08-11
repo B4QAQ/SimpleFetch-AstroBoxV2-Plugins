@@ -49,13 +49,10 @@ pub struct AppConnection {
     pub fail_reason: Option<String>,
 }
 
-/// 持久化到磁盘的应用条目
+/// 持久化到磁盘的应用统计条目
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistedApp {
     pub pkg_name: String,
-    /// 上次退出时是否处于已连接状态（用于自动重连）
-    #[serde(default)]
-    pub was_connected: bool,
     #[serde(default)]
     pub request_count: u64,
     #[serde(default)]
@@ -79,11 +76,6 @@ pub struct PluginState {
 
     /// 待确认的握手：(设备地址, 包名) -> 定时器ID
     pub pending_handshakes: HashMap<(String, String), u64>,
-
-    /// 启动时是否自动重连上次连接的应用
-    pub auto_reconnect: bool,
-    /// 从磁盘恢复的、上次处于已连接状态的包名（自动重连用）
-    pub reconnect_packages: Vec<String>,
 
     /// 心跳检测间隔定时器ID
     pub heartbeat_timer: Option<u64>,
@@ -109,8 +101,6 @@ pub fn with_state<R>(f: impl FnOnce(&mut PluginState) -> R) -> R {
             installed_apps: Vec::new(),
             connections: HashMap::new(),
             pending_handshakes: HashMap::new(),
-            auto_reconnect: true,
-            reconnect_packages: Vec::new(),
             heartbeat_timer: None,
             last_ping_ms: HashMap::new(),
             last_auto_refresh_ms: 0,
@@ -288,19 +278,7 @@ pub fn prune_stale_connections() {
     });
 }
 
-// ========== 自动重连设置 ==========
-
-pub fn set_auto_reconnect(enabled: bool) {
-    with_state(|s| {
-        s.auto_reconnect = enabled;
-        s.render_tick = s.render_tick.wrapping_add(1);
-    });
-    persist_now();
-}
-
-pub fn auto_reconnect() -> bool {
-    with_state(|s| s.auto_reconnect)
-}
+// ========== 心跳追踪 ==========
 
 /// 记录收到心跳的时间
 pub fn record_ping(addr: &str, pkg: &str) {
@@ -332,10 +310,6 @@ pub fn set_heartbeat_timer(id: u64) {
     with_state(|s| s.heartbeat_timer = Some(id));
 }
 
-pub fn reconnect_packages() -> Vec<String> {
-    with_state(|s| s.reconnect_packages.clone())
-}
-
 /// 节流自动刷新：返回 true 表示允许执行一次刷新
 pub fn try_claim_auto_refresh(min_interval_ms: u128) -> bool {
     let now = now_unix_ms();
@@ -358,27 +332,18 @@ pub fn now_unix_ms() -> u128 {
 
 // ========== 持久化 ==========
 
-/// 从磁盘恢复设置与待重连包名
-pub fn restore_from_disk(config: persist::OnDiskConfig) {
-    let reconnect_packages: Vec<String> = config
-        .apps
-        .iter()
-        .filter(|a| a.was_connected)
-        .map(|a| a.pkg_name.clone())
-        .collect();
-    with_state(|s| {
-        s.auto_reconnect = config.auto_reconnect;
-        s.reconnect_packages = reconnect_packages;
-    });
+/// 从磁盘恢复统计数据（启动时不再自动连接）
+pub fn restore_from_disk(_config: persist::OnDiskConfig) {
+    // 自动重连已移除；目前仅保留配置文件读取以兼容旧配置，
+    // 运行时统计在会话内重新累计。
 }
 
-/// 生成待持久化的应用列表（当前已连接或有统计的应用，按包名聚合）
+/// 生成待持久化的应用列表（有统计的应用，按包名聚合）
 fn snapshot_persisted_apps(s: &PluginState) -> Vec<PersistedApp> {
     let mut by_pkg: HashMap<String, PersistedApp> = HashMap::new();
     for ((_addr, pkg), conn) in &s.connections {
         let entry = by_pkg.entry(pkg.clone()).or_insert(PersistedApp {
             pkg_name: pkg.clone(),
-            was_connected: false,
             request_count: 0,
             success_count: 0,
             error_count: 0,
@@ -386,9 +351,6 @@ fn snapshot_persisted_apps(s: &PluginState) -> Vec<PersistedApp> {
         entry.request_count += conn.request_count;
         entry.success_count += conn.success_count;
         entry.error_count += conn.error_count;
-        if conn.status == AppConnectionStatus::Connected {
-            entry.was_connected = true;
-        }
     }
     by_pkg.into_values().collect()
 }
@@ -398,7 +360,6 @@ pub fn persist_now() {
         let apps = snapshot_persisted_apps(s);
         persist::OnDiskConfig {
             version: persist::CURRENT_VERSION,
-            auto_reconnect: s.auto_reconnect,
             apps,
         }
     });

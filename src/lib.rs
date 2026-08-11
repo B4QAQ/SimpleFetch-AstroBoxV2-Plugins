@@ -124,17 +124,12 @@ impl lifecycle::Guest for MyPlugin {
             tracing::info!("register card result: {:?}", result);
         });
 
-        // 从磁盘恢复设置（自动重连开关、上次连接的包名、统计数据）
+        // 从磁盘加载持久化配置
         let config = ui::persist::load_config();
-        let reconnect_count = config
-            .apps
-            .iter()
-            .filter(|a| a.was_connected)
-            .count();
+        tracing::info!("启动：加载了 {} 个历史应用统计", config.apps.len());
         ui::state::restore_from_disk(config);
-        tracing::info!("启动：恢复了 {} 个待重连应用", reconnect_count);
 
-        // 预填充设备和应用缓存，并按需自动重连
+        // 预填充设备和应用缓存，并启动心跳检测
         ui::event_handler::initial_refresh();
     }
 }

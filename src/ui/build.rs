@@ -10,7 +10,6 @@ pub const TAB_ABOUT_EVENT: &str = "tab_about";
 pub const EVENT_REFRESH_DEVICES: &str = "action:devices.refresh";
 pub const APP_CONNECT_PREFIX: &str = "app:connect:";
 pub const APP_DISCONNECT_PREFIX: &str = "app:disconnect:";
-pub const TOGGLE_AUTO_RECONNECT_EVENT: &str = "toggle:auto_reconnect";
 pub const OPEN_HELP_DOC_EVENT: &str = "open_help_doc";
 pub const OPEN_QQ_GROUP_EVENT: &str = "open_qq_group";
 
@@ -430,21 +429,6 @@ fn status_color(status: AppConnectionStatus) -> (&'static str, &'static str) {
 // ========== 关于Tab ==========
 
 fn build_about_tab() -> ui::Element {
-    let auto_reconnect = state::auto_reconnect();
-
-    let settings_title = build_section_title("设置");
-
-    let auto_reconnect_card = build_settings_card(
-        icons::connect_tab_svg(),
-        "启动时自动重连",
-        Some("打开插件时自动连接上次连接的应用"),
-        Some(build_switch(
-            auto_reconnect,
-            TOGGLE_AUTO_RECONNECT_EVENT,
-        )),
-        None,
-    );
-
     let more_title = build_section_title("更多内容");
 
     let help_card = build_settings_card(
@@ -505,8 +489,6 @@ fn build_about_tab() -> ui::Element {
         .flex_direction(ui::FlexDirection::Column)
         .width_full()
         .gap(8)
-        .child(settings_title)
-        .child(auto_reconnect_card)
         .child(more_title)
         .child(help_card)
         .child(qq_card)
@@ -518,12 +500,6 @@ fn build_about_tab() -> ui::Element {
 }
 
 // ========== 辅助组件 ==========
-
-fn build_switch(is_on: bool, event_id: &str) -> ui::Element {
-    ui::Element::new(ui::ElementType::Switch, None)
-        .on(ui::Event::Change, event_id)
-        .prop("checked", if is_on { "true" } else { "false" })
-}
 
 fn build_settings_card(
     icon_svg: String,
