@@ -24,32 +24,7 @@ pub fn execute_request(
     body: Option<&[u8]>,
     timeout_ms: u32,
 ) -> Result<HttpResponse, String> {
-    tracing::info!(
-        "http request: method={} url={} headers={:?} timeout={}ms",
-        method,
-        url,
-        headers,
-        timeout_ms
-    );
-
     let parsed = Url::parse(url).map_err(|e| format!("URL解析失败: {}", e))?;
-
-    // 打印完整 fetch 配置，便于和手表直连请求对比排查
-    tracing::info!("========== SF 请求配置 ==========");
-    tracing::info!("  method : {}", method);
-    tracing::info!("  url    : {}", url);
-    tracing::info!("  timeout: {}ms", timeout_ms);
-    tracing::info!("  headers: {}", serde_json::to_string(headers).unwrap_or_default());
-    if let Some(b) = body {
-        let preview_len = b.len().min(2000);
-        match std::str::from_utf8(&b[..preview_len]) {
-            Ok(text) => tracing::info!("  body   : {} ({} bytes)", text, b.len()),
-            Err(_) => tracing::info!("  body   : <binary {} bytes>", b.len()),
-        }
-    } else {
-        tracing::info!("  body   : <null>");
-    }
-    tracing::info!("=================================");
 
     // 快应用在手表上直连时，@system.fetch 运行时会自动给带 body 的请求加
     // Content-Type，但通过 SF 桥接时这个自动头不会包含在 headers 里。
@@ -72,7 +47,6 @@ pub fn execute_request(
             } else {
                 "application/x-www-form-urlencoded"
             };
-            tracing::info!("补 Content-Type: {}", ct);
             owned_headers.insert("Content-Type".to_string(), ct.to_string());
         }
     }
@@ -156,12 +130,6 @@ pub fn execute_request(
         status_code,
         body.len()
     );
-    // 打印响应体预览，便于对比直连返回的数据
-    let preview_len = body.len().min(2000);
-    match std::str::from_utf8(&body[..preview_len]) {
-        Ok(text) => tracing::info!("  response body: {} ({} bytes)", text, body.len()),
-        Err(_) => tracing::info!("  response body: <binary {} bytes>", body.len()),
-    }
 
     Ok(HttpResponse {
         status_code,

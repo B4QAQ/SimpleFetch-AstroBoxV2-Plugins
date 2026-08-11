@@ -33,9 +33,6 @@ const HANDSHAKE_TIMEOUT_MS: u64 = 5000;
 /// 启动快应用后等待其就绪的时间
 const LAUNCH_READY_WAIT_MS: u64 = 2000;
 
-/// 定时器载荷中标记握手超时的 kind
-const HS_TIMEOUT_KIND: &str = "hs_timeout";
-
 // ========== SSE 取消管理 ==========
 
 static SSE_CANCELS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
@@ -139,20 +136,6 @@ pub fn handle_interconnect_message(payload: &str) {
         return;
     }
 
-    // 只处理已连接/握手中的应用，避免未连接应用的消息被当成代理请求
-    let status = state::connection_status(&parsed.addr, &parsed.pkg_name);
-    if status == AppConnectionStatus::Disconnected || status == AppConnectionStatus::Failed {
-        // 握手确认可能在状态切换间隙到达，若存在待确认握手则放行
-        if !state::is_handshake_pending(&parsed.addr, &parsed.pkg_name) {
-            tracing::warn!(
-                "丢弃未连接应用的消息: pkg={} addr={}",
-                parsed.pkg_name,
-                parsed.addr
-            );
-            return;
-        }
-    }
-
     let msg: Value = match serde_json::from_str(&parsed.data) {
         Ok(v) => v,
         Err(e) => {
@@ -164,6 +147,25 @@ pub fn handle_interconnect_message(payload: &str) {
     let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let status_str = msg.get("status").and_then(|v| v.as_str()).unwrap_or("");
     let data = msg.get("data").cloned();
+
+    // 快应用可主动发起握手：即使当前未连接也放行 SF_HANDSHAKE
+    if msg_type == "SF_HANDSHAKE" {
+        handle_incoming_handshake(&parsed.addr, &parsed.pkg_name);
+        crate::ui::build::render_without_auto_refresh();
+        return;
+    }
+
+    // 其他消息只处理已连接/握手中的应用
+    let status = state::connection_status(&parsed.addr, &parsed.pkg_name);
+    if status == AppConnectionStatus::Disconnected || status == AppConnectionStatus::Failed {
+        if !state::is_handshake_pending(&parsed.addr, &parsed.pkg_name) {
+            tracing::warn!(
+                "丢弃未连接应用的消息: type={} pkg={} addr={}",
+                msg_type, parsed.pkg_name, parsed.addr
+            );
+            return;
+        }
+    }
 
     tracing::info!(
         "SF消息: type={} status={} pkg={} addr={}",
@@ -185,6 +187,8 @@ fn dispatch_sf(addr: &str, pkg: &str, msg_type: &str, status: &str, data: Option
             }
         }
         "SF_PING" => {
+            // 记录心跳时间，用于心跳超时检测
+            state::record_ping(addr, pkg);
             // 心跳：原样回传 ts
             let ts = data
                 .as_ref()
@@ -260,6 +264,37 @@ fn handle_handshake_ack(addr: &str, pkg: &str) {
             .unwrap_or_else(|| pkg.to_string())
     });
     show_alert("连接成功", &app_label);
+}
+
+/// 快应用主动发起握手：注册接收器并回复 ACK，建立连接
+fn handle_incoming_handshake(addr: &str, pkg: &str) {
+    tracing::info!("收到快应用主动握手: addr={} pkg={}", addr, pkg);
+    // 若有插件发起的待确认握手，清除其超时定时器（已被对端握手满足）
+    if let Some(timer_id) = state::take_pending_handshake(addr, pkg) {
+        clear_timer(timer_id);
+    }
+    // 注册接收器，确保能收到后续消息
+    let addr_owned = addr.to_string();
+    let pkg_owned = pkg.to_string();
+    wit_bindgen::block_on(async move {
+        let _ = register::register_interconnect_recv(&addr_owned, &pkg_owned).await;
+    });
+
+    state::set_connection_status(addr, pkg, AppConnectionStatus::Connected);
+    state::record_ping(addr, pkg);
+    state::persist_now();
+
+    // 回复握手确认
+    send_json(
+        addr,
+        pkg,
+        json!({
+            "type": "SF_HANDSHAKE_ACK",
+            "status": "OK",
+            "data": {}
+        }),
+    );
+    crate::ui::build::render_without_auto_refresh();
 }
 
 /// 握手超时定时器触发
@@ -645,6 +680,9 @@ pub fn initial_refresh() {
         register_for_all_devices(&pkg);
     }
 
+    // 启动心跳检测定时器
+    start_heartbeat_timer();
+
     // 自动重连上次连接的应用
     if state::auto_reconnect() {
         let reconnect = state::reconnect_packages();
@@ -653,6 +691,15 @@ pub fn initial_refresh() {
             auto_reconnect_apps(&reconnect);
         }
     }
+}
+
+/// 启动心跳检测 interval（每 3 秒检查一次）
+fn start_heartbeat_timer() {
+    let payload = json!({ "kind": HEARTBEAT_KIND }).to_string();
+    wit_bindgen::block_on(async move {
+        let id = timer::set_interval(HEARTBEAT_INTERVAL_MS, &payload).await;
+        state::set_heartbeat_timer(id);
+    });
 }
 
 /// 自动重连：先启动所有应用，统一等待后批量握手
@@ -823,24 +870,55 @@ fn clear_timer(timer_id: u64) {
 
 // ========== 定时器事件 ==========
 
+/// 心跳检测间隔
+const HEARTBEAT_INTERVAL_MS: u64 = 3000;
+/// 心跳超时阈值（超过此时长未收到 PING 则断开）。
+/// 文档：快应用每10秒发一次 PING，5秒内未收到回复会断开。这里给足余量。
+const HEARTBEAT_TIMEOUT_MS: u128 = 30_000;
+/// 定时器载荷中标记握手超时的 kind
+const HS_TIMEOUT_KIND: &str = "hs_timeout";
+/// 定时器载荷中标记心跳检测的 kind
+const HEARTBEAT_KIND: &str = "heartbeat";
+
 pub fn handle_timer_payload(payload: &str) {
-    // 宿主定时器事件格式：{"timerId":N,"kind":"timeout","payload":"..."}
+    // lib.rs 已从宿主信封 {"timerId":..,"kind":..,"payload":"..."} 中
+    // 提取出 payload 字符串传入，这里直接解析业务载荷。
     let Ok(json) = serde_json::from_str::<Value>(payload) else {
         return;
     };
-    let Some(inner) = json.get("payload").and_then(|v| v.as_str()) else {
-        return;
-    };
-    let Ok(inner) = serde_json::from_str::<Value>(inner) else {
-        return;
-    };
-    let kind = inner.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    if kind == HS_TIMEOUT_KIND {
-        let addr = inner.get("addr").and_then(|v| v.as_str()).unwrap_or("");
-        let pkg = inner.get("pkg").and_then(|v| v.as_str()).unwrap_or("");
-        if !addr.is_empty() && !pkg.is_empty() {
-            handle_handshake_timeout(addr, pkg);
+    let kind = json.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    match kind {
+        HS_TIMEOUT_KIND => {
+            let addr = json.get("addr").and_then(|v| v.as_str()).unwrap_or("");
+            let pkg = json.get("pkg").and_then(|v| v.as_str()).unwrap_or("");
+            if !addr.is_empty() && !pkg.is_empty() {
+                handle_handshake_timeout(addr, pkg);
+            }
         }
+        HEARTBEAT_KIND => {
+            check_heartbeat_timeout();
+        }
+        _ => {}
+    }
+}
+
+/// 检查所有已连接应用的心跳，超时的发送 SF_CLOSE_BRIDGE 并断开
+fn check_heartbeat_timeout() {
+    let stale = state::stale_connections(HEARTBEAT_TIMEOUT_MS);
+    let any = !stale.is_empty();
+    for (addr, pkg) in stale {
+        tracing::warn!("心跳超时，断开连接: addr={} pkg={}", addr, pkg);
+        // 通知快应用关闭桥接
+        send_json(
+            &addr,
+            &pkg,
+            json!({ "type": "SF_CLOSE_BRIDGE", "data": {} }),
+        );
+        state::set_connection_status(&addr, &pkg, AppConnectionStatus::Disconnected);
+        state::persist_now();
+    }
+    if any {
+        crate::ui::build::render_without_auto_refresh();
     }
 }
 
@@ -951,6 +1029,8 @@ fn classify_network_error(e: &str) -> String {
 
 fn send_json(addr: &str, pkg_name: &str, message: Value) {
     let text = message.to_string();
+    // 打印发送给快应用的数据
+    tracing::info!("发送 → pkg={} addr={} data={}", pkg_name, addr, text);
     let addr_owned = addr.to_string();
     let pkg_owned = pkg_name.to_string();
     let result = wit_bindgen::block_on(async move {

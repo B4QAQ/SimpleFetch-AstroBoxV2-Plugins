@@ -85,6 +85,11 @@ pub struct PluginState {
     /// 从磁盘恢复的、上次处于已连接状态的包名（自动重连用）
     pub reconnect_packages: Vec<String>,
 
+    /// 心跳检测间隔定时器ID
+    pub heartbeat_timer: Option<u64>,
+    /// 每个(设备,包名)最近一次收到 SF_PING 的时间戳(ms)
+    pub last_ping_ms: HashMap<(String, String), u128>,
+
     /// 上次自动刷新时间戳（节流用）
     pub last_auto_refresh_ms: u128,
 
@@ -106,6 +111,8 @@ pub fn with_state<R>(f: impl FnOnce(&mut PluginState) -> R) -> R {
             pending_handshakes: HashMap::new(),
             auto_reconnect: true,
             reconnect_packages: Vec::new(),
+            heartbeat_timer: None,
+            last_ping_ms: HashMap::new(),
             last_auto_refresh_ms: 0,
             devices_loading: false,
             apps_loading: false,
@@ -142,6 +149,12 @@ pub fn set_connection_status(addr: &str, pkg: &str, status: AppConnectionStatus)
         entry.status = status;
         if status != AppConnectionStatus::Failed {
             entry.fail_reason = None;
+        }
+        // 连接建立时记录初始心跳时间；断开时清除
+        if status == AppConnectionStatus::Connected {
+            s.last_ping_ms.insert(key(addr, pkg), now_unix_ms());
+        } else if status == AppConnectionStatus::Disconnected {
+            s.last_ping_ms.remove(&key(addr, pkg));
         }
         s.render_tick = s.render_tick.wrapping_add(1);
     });
@@ -287,6 +300,36 @@ pub fn set_auto_reconnect(enabled: bool) {
 
 pub fn auto_reconnect() -> bool {
     with_state(|s| s.auto_reconnect)
+}
+
+/// 记录收到心跳的时间
+pub fn record_ping(addr: &str, pkg: &str) {
+    with_state(|s| {
+        s.last_ping_ms.insert(key(addr, pkg), now_unix_ms());
+    });
+}
+
+/// 返回所有已连接但超过 threshold_ms 未收到心跳的 (addr, pkg)
+pub fn stale_connections(threshold_ms: u128) -> Vec<(String, String)> {
+    let now = now_unix_ms();
+    with_state(|s| {
+        s.connections
+            .iter()
+            .filter(|(_, c)| c.status == AppConnectionStatus::Connected)
+            .filter_map(|(k, _)| {
+                let last = s.last_ping_ms.get(k).copied().unwrap_or(0);
+                if now.saturating_sub(last) > threshold_ms {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    })
+}
+
+pub fn set_heartbeat_timer(id: u64) {
+    with_state(|s| s.heartbeat_timer = Some(id));
 }
 
 pub fn reconnect_packages() -> Vec<String> {
