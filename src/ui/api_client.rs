@@ -33,20 +33,28 @@ pub fn execute_request(
     );
 
     let parsed = Url::parse(url).map_err(|e| format!("URL解析失败: {}", e))?;
+    let body_len = body.map(|b| b.len()).unwrap_or(0);
+    tracing::info!(
+        "execute_request: method={} url={} body_len={} header_count={}",
+        method, url, body_len, headers.len()
+    );
     let (req, outgoing_body) = build_outgoing_request(method, &parsed, headers, body)?;
 
-    // 发送请求体
+    // 发送请求体（仅当有 body 时才打开写入流）
     if let Some(data) = body {
-        let stream = outgoing_body
-            .write()
-            .map_err(|_| "打开请求体写入流失败".to_string())?;
-        stream
-            .blocking_write_and_flush(data)
-            .map_err(|e| format!("写入请求体失败: {:?}", e))?;
-        drop(stream);
+        if !data.is_empty() {
+            let stream = outgoing_body
+                .write()
+                .map_err(|e| format!("打开请求体写入流失败: {:?}", e))?;
+            stream
+                .blocking_write_and_flush(data)
+                .map_err(|e| format!("写入请求体失败: {:?}", e))?;
+            tracing::info!("request body written: {} bytes", data.len());
+            drop(stream);
+        }
     }
     http_types::OutgoingBody::finish(outgoing_body, None)
-        .map_err(|_| "结束请求体失败".to_string())?;
+        .map_err(|e| format!("结束请求体失败: {:?}", e))?;
 
     // 设置连接超时（WASI duration 单位为纳秒）
     let timeout_ns = (timeout_ms as u64) * 1_000_000;

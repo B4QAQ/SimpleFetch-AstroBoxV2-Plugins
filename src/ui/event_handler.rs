@@ -206,6 +206,13 @@ fn dispatch_sf(addr: &str, pkg: &str, msg_type: &str, status: &str, data: Option
                 handle_sf_request(addr, pkg, d);
             }
         }
+        "SF_CLOSE_BRIDGE_ACK" => {
+            // 快应用确认关闭桥接
+            tracing::info!("收到 SF_CLOSE_BRIDGE_ACK: pkg={} addr={}", pkg, addr);
+            state::set_connection_status(addr, pkg, AppConnectionStatus::Disconnected);
+            state::persist_now();
+            crate::ui::build::render_without_auto_refresh();
+        }
         "SF_CLOSE" => {
             if let Some(id) = data
                 .and_then(|d| d.get("id").and_then(|v| v.as_str()).map(String::from))
@@ -330,7 +337,20 @@ fn disconnect_app(app: &InstalledApp) {
     // 取消该应用下所有 SSE 流
     cancel_all_sse_for_app(addr, pkg);
 
-    state::set_connection_status(addr, pkg, AppConnectionStatus::Disconnected);
+    // 通知快应用关闭桥接（快应用会回 SF_CLOSE_BRIDGE_ACK，届时最终置为 Disconnected）。
+    // 仅当当前处于已连接状态时发送；若仍在握手中则不发送。
+    if state::connection_status(addr, pkg) == AppConnectionStatus::Connected {
+        tracing::info!("发送 SF_CLOSE_BRIDGE: addr={} pkg={}", addr, pkg);
+        send_json(
+            addr,
+            pkg,
+            json!({ "type": "SF_CLOSE_BRIDGE", "data": {} }),
+        );
+        // 先置为 Disconnected（ACK 到达时会再次确认），UI 立即响应断开
+        state::set_connection_status(addr, pkg, AppConnectionStatus::Disconnected);
+    } else {
+        state::set_connection_status(addr, pkg, AppConnectionStatus::Disconnected);
+    }
     state::persist_now();
     crate::ui::build::render_without_auto_refresh();
     tracing::info!("已断开: addr={} pkg={}", addr, pkg);
@@ -378,6 +398,8 @@ fn handle_sf_request(addr: &str, pkg: &str, data: Value) {
             timeout_ms,
         );
     } else {
+        // 普通请求同步执行（与参考实现一致）：WASI HTTP 的阻塞等待会驱动事件循环，
+        // 不会导致心跳永久卡死。spawn 脱离 on_event 的根任务后反而可能不被轮询。
         execute_and_respond(
             addr, pkg, &id, &method, &url, &headers, body_bytes.as_deref(), timeout_ms,
         );
@@ -397,12 +419,16 @@ fn execute_and_respond(
     match api_client::execute_request(method, url, headers, body, timeout_ms) {
         Ok(resp) => {
             let ok = (200..300).contains(&resp.status_code);
+            tracing::info!(
+                "请求完成: id={} status={} body_len={}",
+                id, resp.status_code, resp.body.len()
+            );
             state::record_result(addr, pkg, ok, Some(format!("HTTP {}", resp.status_code)));
             let resp_headers = filter_response_headers(&resp.headers);
             send_response(addr, pkg, id, resp.status_code, &resp_headers, &resp.body);
         }
         Err(e) => {
-            tracing::error!("HTTP请求失败: {}", e);
+            tracing::error!("HTTP请求失败: id={} err={}", id, e);
             state::record_result(addr, pkg, false, Some(e.clone()));
             let err_msg = classify_network_error(&e);
             send_error(addr, pkg, id, 0, &err_msg);

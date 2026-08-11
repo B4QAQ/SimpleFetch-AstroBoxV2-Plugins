@@ -26,6 +26,8 @@ SimpleFetch 是快应用侧通过互联通道（interconnect）代理网络请�
 | 快应用→手机 | `SF_HANDSHAKE_ACK` | 握手确认 |
 | 快应用→手机 | `SF_PING` | 心跳 |
 | 手机→快应用 | `SF_PONG` | 心跳回复 |
+| 手机→快应用 | `SF_CLOSE_BRIDGE` | 手动关闭桥接 |
+| 快应用→手机 | `SF_CLOSE_BRIDGE_ACK` | 关闭桥接确认 |
 | 快应用→手机 | `SF_REQUEST` | 网络请求 |
 | 手机→快应用 | `SF_RESPONSE` | 请求响应（含分片） |
 | 手机→快应用 | `SF_SSE_EVENT` | SSE 事件 |
@@ -71,9 +73,27 @@ SimpleFetch 是快应用侧通过互联通道（interconnect）代理网络请�
 
 ---
 
-## 3. 普通请求
+## 3. 手动关闭桥接
 
-### 3.1 快应用发送请求
+手机端可主动要求快应用关闭桥接网络。适用于手机端检测到自身网络不可用、用户手动断开代理等场景。
+
+**手机发送：**
+```json
+{ "type": "SF_CLOSE_BRIDGE", "data": {} }
+```
+
+**快应用回复：**
+```json
+{ "type": "SF_CLOSE_BRIDGE_ACK", "status": "OK", "data": {} }
+```
+
+快应用收到后会：回复确认 → 停止心跳 → 拒绝所有待处理请求和 SSE → 将 `NetworkStatus` 设为 `'none'` → 调用 `getDeviceInfo()` 刷新网络状态。
+
+---
+
+## 4. 普通请求
+
+### 4.1 快应用发送请求
 
 ```json
 {
@@ -100,7 +120,7 @@ SimpleFetch 是快应用侧通过互联通道（interconnect）代理网络请�
 | `sse` | boolean | 是否为 SSE 请求（普通请求为 false） |
 | `timeout` | number | 超时时间(ms) |
 
-### 3.2 小数据响应（≤16KB）
+### 4.2 小数据响应（≤16KB）
 
 单条消息返回完整数据，`totalChunks` 为 0：
 
@@ -119,7 +139,7 @@ SimpleFetch 是快应用侧通过互联通道（interconnect）代理网络请�
 }
 ```
 
-### 3.3 大数据分片响应（>16KB）
+### 4.3 大数据分片响应（>16KB）
 
 当响应体超过 16KB 时，手机端需将 body 进行 **base64 编码**，然后分片发送。每条消息的 `totalChunks` > 0，`chunk` 从 1 递增到 `totalChunks`。
 
@@ -177,7 +197,7 @@ SimpleFetch 是快应用侧通过互联通道（interconnect）代理网络请�
 - body 需 base64 编码（快应用侧使用 `crypto.atob` 解码）
 - 分片必须按顺序发送
 
-### 3.4 错误响应
+### 4.4 错误响应
 
 `status` 直接填错误原因：
 
@@ -203,9 +223,9 @@ SimpleFetch 是快应用侧通过互联通道（interconnect）代理网络请�
 
 ---
 
-## 4. SSE 流式请求
+## 5. SSE 流式请求
 
-### 4.1 快应用发起 SSE
+### 5.1 快应用发起 SSE
 
 ```json
 {
@@ -224,7 +244,7 @@ SimpleFetch 是快应用侧通过互联通道（interconnect）代理网络请�
 
 `sse: true` 标识此请求为 SSE 流式请求。
 
-### 4.2 手机端转发 SSE 事件
+### 5.2 手机端转发 SSE 事件
 
 手机端建立 SSE 连接后，每收到一个服务端事件就转发一条消息：
 
@@ -245,7 +265,7 @@ SimpleFetch 是快应用侧通过互联通道（interconnect）代理网络请�
 | `event` | string\|null | SSE 事件类型，默认 `"message"` |
 | `data` | string | SSE 事件数据 |
 
-### 4.3 SSE 流结束
+### 5.3 SSE 流结束
 
 服务端关闭 SSE 连接时发送：
 
@@ -253,7 +273,7 @@ SimpleFetch 是快应用侧通过互联通道（interconnect）代理网络请�
 { "type": "SF_SSE_END", "data": { "id": "sf_2" } }
 ```
 
-### 4.4 SSE 错误
+### 5.4 SSE 错误
 
 SSE 连接出错时发送，`status` 填错误原因：
 
@@ -265,7 +285,7 @@ SSE 连接出错时发送，`status` 填错误原因：
 }
 ```
 
-### 4.5 快应用主动关闭 SSE
+### 5.5 快应用主动关闭 SSE
 
 快应用发送 `SF_CLOSE`，手机端应关闭对应的 SSE 连接：
 
@@ -275,7 +295,7 @@ SSE 连接出错时发送，`status` 填错误原因：
 
 ---
 
-## 5. 完整交互时序
+## 6. 完整交互时序
 
 ### 普通请求
 
@@ -344,9 +364,22 @@ SSE 连接出错时发送，`status` 填错误原因：
  │                              │  调用getDeviceInfo()刷新
 ```
 
+### 手动关闭桥接
+
+```
+手机                          快应用
+ │                              │
+ │──── SF_CLOSE_BRIDGE ───────→│  手机要求关闭桥接
+ │←─── SF_CLOSE_BRIDGE_ACK ────│  快应用确认
+ │                              │  停止心跳
+ │                              │  reject所有待处理请求
+ │                              │  NetworkStatus='none'
+ │                              │  调用getDeviceInfo()刷新
+```
+
 ---
 
-## 6. 注意事项
+## 7. 注意事项
 
 1. **包名和签名**：手机端 App 的包名必须与快应用 `manifest.json` 中的 `package` 字段一致（`moe.mcns.ResonaUI`），且签名匹配
 2. **心跳必须回复**：5 秒内未回复 PONG，快应用会自动断开桥接
@@ -355,3 +388,4 @@ SSE 连接出错时发送，`status` 填错误原因：
 5. **错误 status 直接是原因**：不要用错误码，直接用可读的中文错误描述
 6. **请求 ID 关联**：响应中的 `id` 必须与请求中的 `id` 一致，快应用靠此关联请求和响应
 7. **互联连接断开**：当互联通道断开时，快应用会自动停用桥接，手机端无需额外处理
+8. **手动关闭桥接**：手机端可发送 `SF_CLOSE_BRIDGE` 主动要求关闭，快应用回复确认后停用桥接
