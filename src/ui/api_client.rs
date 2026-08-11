@@ -38,7 +38,38 @@ pub fn execute_request(
         "execute_request: method={} url={} body_len={} header_count={}",
         method, url, body_len, headers.len()
     );
-    let (req, outgoing_body) = build_outgoing_request(method, &parsed, headers, body)?;
+
+    // 有请求体但缺少 Content-Type 时，按 fetch 规范补默认值。
+    // 手表快应用运行时直连会自动加头，但走 SF 代理时需要我们补上，
+    // 否则服务器可能无法解析 body（如返回 500）。
+    let mut owned_headers = headers.clone();
+    if body_len > 0 {
+        let has_ct = owned_headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("content-type"));
+        if !has_ct {
+            // 内容看起来是 JSON 就用 application/json，否则用 text/plain
+            let is_json = body
+                .map(|b| {
+                    let trimmed = b
+                        .iter()
+                        .find(|b| !b.is_ascii_whitespace())
+                        .copied()
+                        .unwrap_or(0);
+                    trimmed == b'{' || trimmed == b'['
+                })
+                .unwrap_or(false);
+            let ct = if is_json {
+                "application/json"
+            } else {
+                "text/plain;charset=UTF-8"
+            };
+            tracing::info!("补默认 Content-Type: {}", ct);
+            owned_headers.insert("Content-Type".to_string(), ct.to_string());
+        }
+    }
+
+    let (req, outgoing_body) = build_outgoing_request(method, &parsed, &owned_headers, body)?;
 
     // 发送请求体（仅当有 body 时才打开写入流）
     if let Some(data) = body {
@@ -117,6 +148,12 @@ pub fn execute_request(
         status_code,
         body.len()
     );
+    // 非 2xx 响应打印 body 预览，便于排查服务端错误
+    if !(200..300).contains(&status_code) {
+        let preview_len = body.len().min(500);
+        let preview = String::from_utf8_lossy(&body[..preview_len]);
+        tracing::warn!("http error response body: {}", preview);
+    }
 
     Ok(HttpResponse {
         status_code,
