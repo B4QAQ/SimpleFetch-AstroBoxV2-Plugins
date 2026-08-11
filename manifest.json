@@ -1,7 +1,7 @@
 {
     "name": "SimpleFetch",
     "icon": "icon.png",
-    "version": "1.1.3",
+    "version": "1.1.4",
     "description": "为快应用提供网络桥接，代理HTTP/SSE请求",
     "author": "B4QAQ",
     "website": "https://docs.b4qaq.cn/docs/simplefetch",

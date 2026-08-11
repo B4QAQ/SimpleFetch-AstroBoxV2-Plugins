@@ -245,7 +245,21 @@ fn handle_handshake_ack(addr: &str, pkg: &str) {
     crate::ui::build::render_without_auto_refresh();
 
     tracing::info!("握手成功: addr={} pkg={}", addr, pkg);
-    show_alert("连接成功", &format!("已连接 {}", pkg));
+    // 弹窗显示 应用名(包名)
+    let app_label = state::with_state(|s| {
+        s.installed_apps
+            .iter()
+            .find(|a| a.addr == addr && a.package_name == pkg)
+            .map(|a| {
+                if a.app_name.is_empty() {
+                    a.package_name.clone()
+                } else {
+                    format!("{}({})", a.app_name, a.package_name)
+                }
+            })
+            .unwrap_or_else(|| pkg.to_string())
+    });
+    show_alert("连接成功", &app_label);
 }
 
 /// 握手超时定时器触发

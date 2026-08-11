@@ -368,9 +368,6 @@ fn app_row(app: &InstalledApp, idx: usize) -> ui::Element {
                 if let Some(ref st) = c.last_status {
                     info_col = info_col.child(detail_text(&format!("最近状态: {}", st)));
                 }
-                if let Some(ref url) = c.last_url {
-                    info_col = info_col.child(detail_text(&format!("最近 URL: {}", url)));
-                }
             }
             AppConnectionStatus::Failed => {
                 if let Some(ref reason) = c.fail_reason {
