@@ -107,7 +107,7 @@ python scripts/build_dist.py --release --package
 3. 插件收到 `SF_REQUEST` 后执行真实 HTTP 请求，并将结果按 `SF_RESPONSE` 格式回传；
 4. 心跳维持连接，断开时自动回退网络状态。
 
-手机端配套的快应用示例见 [ResonaUI-Example](https://github.com/B4QAQ/ResonaUI-Example)。
+手机端配套的快应用示例见 [ResonaUI](https://github.com/B4QAQ/ResonaUI)。
 
 ---
 
@@ -215,7 +215,7 @@ SimpleFetch-AstroBoxV2-Plugins/
 
 ## 📄 许可证
 
-本项目采用 [MIT](LICENSE) 许可证。
+本项目采用 [GNU AGPL v3.0](https://www.gnu.org/licenses/agpl-3.0.html) 许可证。
 
 ---
 
