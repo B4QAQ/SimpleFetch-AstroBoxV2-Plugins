@@ -3,63 +3,71 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ui::state::AppEntry;
+use crate::ui::state::PersistedApp;
 
 /// 持久化配置文件路径
 const CONFIG_PATH: &str = "./simplefetch.config.json";
-const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct OnDiskConfig {
-    version: u32,
+pub struct OnDiskConfig {
+    pub version: u32,
+    /// 启动时是否自动重连上次连接的应用
+    #[serde(default = "default_auto_reconnect")]
+    pub auto_reconnect: bool,
     #[serde(default)]
-    monitored: Vec<AppEntry>,
+    pub apps: Vec<PersistedApp>,
 }
 
-/// 从磁盘加载已监听的应用列表
-pub fn load_apps() -> Vec<AppEntry> {
+fn default_auto_reconnect() -> bool {
+    true
+}
+
+impl Default for OnDiskConfig {
+    fn default() -> Self {
+        Self {
+            version: CURRENT_VERSION,
+            auto_reconnect: true,
+            apps: Vec::new(),
+        }
+    }
+}
+
+/// 从磁盘加载配置，文件缺失或损坏时返回默认值
+pub fn load_config() -> OnDiskConfig {
     let path = Path::new(CONFIG_PATH);
     if !path.exists() {
         tracing::info!("persist: no config file at {} (first run)", CONFIG_PATH);
-        return Vec::new();
+        return OnDiskConfig::default();
     }
 
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(err) => {
             tracing::warn!("persist: failed to read {}: {}", CONFIG_PATH, err);
-            return Vec::new();
+            return OnDiskConfig::default();
         }
     };
 
-    let config: OnDiskConfig = match serde_json::from_str(&text) {
-        Ok(c) => c,
+    match serde_json::from_str::<OnDiskConfig>(&text) {
+        Ok(c) => {
+            tracing::info!(
+                "persist: loaded config (auto_reconnect={}, apps={})",
+                c.auto_reconnect,
+                c.apps.len()
+            );
+            c
+        }
         Err(err) => {
             tracing::warn!("persist: failed to parse {}: {}", CONFIG_PATH, err);
-            return Vec::new();
+            OnDiskConfig::default()
         }
-    };
-
-    if config.version != CURRENT_VERSION {
-        tracing::warn!(
-            "persist: ignoring config with version {} (expected {})",
-            config.version,
-            CURRENT_VERSION
-        );
-        return Vec::new();
     }
-
-    tracing::info!("persist: loaded {} monitored apps", config.monitored.len());
-    config.monitored
 }
 
-/// 保存已监听的应用列表到磁盘
-pub fn save_apps(apps: &[AppEntry]) {
-    let payload = OnDiskConfig {
-        version: CURRENT_VERSION,
-        monitored: apps.to_vec(),
-    };
-    let text = match serde_json::to_string_pretty(&payload) {
+/// 原子写入配置到磁盘
+pub fn save_config(config: &OnDiskConfig) {
+    let text = match serde_json::to_string_pretty(config) {
         Ok(t) => t,
         Err(err) => {
             tracing::error!("persist: failed to serialize config: {}", err);
@@ -79,8 +87,6 @@ pub fn save_apps(apps: &[AppEntry]) {
         );
         if let Err(err) = fs::write(CONFIG_PATH, &text) {
             tracing::error!("persist: direct write also failed: {}", err);
-            return;
         }
     }
-    tracing::debug!("persist: wrote {} ({} bytes)", CONFIG_PATH, text.len());
 }

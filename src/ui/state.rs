@@ -12,41 +12,18 @@ pub enum MainTab {
     About,
 }
 
-/// 已监听的应用条目
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AppEntry {
-    pub pkg_name: String,
-    pub enabled: bool,
-    #[serde(default)]
-    pub request_count: u64,
-    #[serde(default)]
-    pub success_count: u64,
-    #[serde(default)]
-    pub error_count: u64,
-    #[serde(default)]
-    pub last_seen_unix_ms: Option<u128>,
-    #[serde(default)]
-    pub last_addr: Option<String>,
-    #[serde(default)]
-    pub last_status: Option<String>,
-    #[serde(default)]
-    pub last_url: Option<String>,
-}
-
-impl AppEntry {
-    pub fn new(pkg_name: &str) -> Self {
-        Self {
-            pkg_name: pkg_name.to_string(),
-            enabled: true,
-            request_count: 0,
-            success_count: 0,
-            error_count: 0,
-            last_seen_unix_ms: None,
-            last_addr: None,
-            last_status: None,
-            last_url: None,
-        }
-    }
+/// 应用连接状态
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AppConnectionStatus {
+    /// 未连接（灰色圆点，显示[连接]）
+    #[default]
+    Disconnected,
+    /// 握手中（黄色圆点，显示禁用的[连接中…]）
+    Handshaking,
+    /// 已连接（绿色圆点，显示[断开]并展开详细信息）
+    Connected,
+    /// 连接失败（红色圆点，显示[重试]和失败原因）
+    Failed,
 }
 
 /// 设备上安装的第三方快应用
@@ -59,30 +36,61 @@ pub struct InstalledApp {
     pub version_code: u32,
 }
 
+/// 单个应用的运行时连接状态与统计（按 (设备地址, 包名) 索引）
+#[derive(Clone, Debug, Default)]
+pub struct AppConnection {
+    pub status: AppConnectionStatus,
+    pub request_count: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub last_status: Option<String>,
+    pub last_url: Option<String>,
+    /// 连接失败时的原因
+    pub fail_reason: Option<String>,
+}
+
+/// 持久化到磁盘的应用条目
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PersistedApp {
+    pub pkg_name: String,
+    /// 上次退出时是否处于已连接状态（用于自动重连）
+    #[serde(default)]
+    pub was_connected: bool,
+    #[serde(default)]
+    pub request_count: u64,
+    #[serde(default)]
+    pub success_count: u64,
+    #[serde(default)]
+    pub error_count: u64,
+}
+
 /// 插件全局状态
 pub struct PluginState {
-    /// 当前Tab
     pub current_tab: MainTab,
-    /// 已监听的应用（按包名索引）
-    pub apps: HashMap<String, AppEntry>,
-    /// 根元素ID
     pub root_element_id: Option<String>,
-    /// 通知消息
-    pub last_notice: Option<String>,
-    /// 手动添加包名的输入框内容
-    pub pending_add_pkg: String,
-    /// 已连接设备列表 (addr, name)
+
+    /// 已连接设备 (addr, name)
     pub connected_devices: Vec<(String, String)>,
-    /// 所有已安装的第三方快应用
+    /// 所有设备上的第三方快应用
     pub installed_apps: Vec<InstalledApp>,
+
+    /// 按 (设备地址, 包名) 索引的连接状态与统计
+    pub connections: HashMap<(String, String), AppConnection>,
+
+    /// 待确认的握手：(设备地址, 包名) -> 定时器ID
+    pub pending_handshakes: HashMap<(String, String), u64>,
+
+    /// 启动时是否自动重连上次连接的应用
+    pub auto_reconnect: bool,
+    /// 从磁盘恢复的、上次处于已连接状态的包名（自动重连用）
+    pub reconnect_packages: Vec<String>,
+
     /// 上次自动刷新时间戳（节流用）
     pub last_auto_refresh_ms: u128,
-    /// 渲染序列号（确保UI更新反映最新状态）
-    pub render_tick: u64,
-    /// 设备列表是否正在加载
+
     pub devices_loading: bool,
-    /// 应用列表是否正在加载
     pub apps_loading: bool,
+    pub render_tick: u64,
 }
 
 static STATE: OnceLock<Mutex<PluginState>> = OnceLock::new();
@@ -91,230 +99,209 @@ pub fn with_state<R>(f: impl FnOnce(&mut PluginState) -> R) -> R {
     let mutex = STATE.get_or_init(|| {
         Mutex::new(PluginState {
             current_tab: MainTab::Connect,
-            apps: HashMap::new(),
             root_element_id: None,
-            last_notice: None,
-            pending_add_pkg: String::new(),
             connected_devices: Vec::new(),
             installed_apps: Vec::new(),
+            connections: HashMap::new(),
+            pending_handshakes: HashMap::new(),
+            auto_reconnect: true,
+            reconnect_packages: Vec::new(),
             last_auto_refresh_ms: 0,
-            render_tick: 0,
             devices_loading: false,
             apps_loading: false,
+            render_tick: 0,
         })
     });
     let mut guard = mutex.lock().unwrap_or_else(|p| p.into_inner());
     f(&mut guard)
 }
 
-pub fn ensure_app(pkg_name: &str) {
-    let inserted = with_state(|state| {
-        let before = state.apps.contains_key(pkg_name);
-        state
-            .apps
-            .entry(pkg_name.to_string())
-            .or_insert_with(|| AppEntry::new(pkg_name));
-        !before
-    });
-    if inserted {
-        persist_now();
-    }
+#[inline]
+fn key(addr: &str, pkg: &str) -> (String, String) {
+    (addr.to_string(), pkg.to_string())
 }
 
-/// 启动时批量加载应用条目
-pub fn install_loaded_apps(entries: Vec<AppEntry>) {
-    with_state(|state| {
-        for entry in entries {
-            state.apps.insert(entry.pkg_name.clone(), entry);
-        }
-        state.render_tick = state.render_tick.wrapping_add(1);
-    });
-}
+// ========== 连接状态访问 ==========
 
-pub fn is_enabled(pkg_name: &str) -> bool {
-    with_state(|state| {
-        state
-            .apps
-            .get(pkg_name)
-            .map(|e| e.enabled)
-            .unwrap_or(true)
+pub fn connection_status(addr: &str, pkg: &str) -> AppConnectionStatus {
+    with_state(|s| {
+        s.connections
+            .get(&key(addr, pkg))
+            .map(|c| c.status)
+            .unwrap_or(AppConnectionStatus::Disconnected)
     })
 }
 
-pub fn record_request(pkg_name: &str, addr: &str, url: Option<&str>) {
-    let now_ms = now_unix_ms();
-    with_state(|state| {
-        let entry = state
-            .apps
-            .entry(pkg_name.to_string())
-            .or_insert_with(|| AppEntry::new(pkg_name));
-        entry.request_count = entry.request_count.saturating_add(1);
-        entry.last_seen_unix_ms = Some(now_ms);
-        entry.last_addr = Some(addr.to_string());
-        if let Some(url) = url {
-            entry.last_url = Some(url.to_string());
+pub fn connection(addr: &str, pkg: &str) -> Option<AppConnection> {
+    with_state(|s| s.connections.get(&key(addr, pkg)).cloned())
+}
+
+pub fn set_connection_status(addr: &str, pkg: &str, status: AppConnectionStatus) {
+    with_state(|s| {
+        let entry = s.connections.entry(key(addr, pkg)).or_default();
+        entry.status = status;
+        if status != AppConnectionStatus::Failed {
+            entry.fail_reason = None;
         }
-        state.render_tick = state.render_tick.wrapping_add(1);
+        s.render_tick = s.render_tick.wrapping_add(1);
+    });
+}
+
+pub fn set_connection_failed(addr: &str, pkg: &str, reason: &str) {
+    with_state(|s| {
+        let entry = s.connections.entry(key(addr, pkg)).or_default();
+        entry.status = AppConnectionStatus::Failed;
+        entry.fail_reason = Some(reason.to_string());
+        s.render_tick = s.render_tick.wrapping_add(1);
+    });
+}
+
+pub fn record_request(addr: &str, pkg: &str, url: Option<&str>) {
+    with_state(|s| {
+        let entry = s.connections.entry(key(addr, pkg)).or_default();
+        entry.request_count = entry.request_count.saturating_add(1);
+        if let Some(u) = url {
+            entry.last_url = Some(u.to_string());
+        }
+        s.render_tick = s.render_tick.wrapping_add(1);
     });
     persist_now();
 }
 
-pub fn record_result(pkg_name: &str, ok: bool, status: Option<String>) {
-    with_state(|state| {
-        let entry = state
-            .apps
-            .entry(pkg_name.to_string())
-            .or_insert_with(|| AppEntry::new(pkg_name));
+pub fn record_result(addr: &str, pkg: &str, ok: bool, status: Option<String>) {
+    with_state(|s| {
+        let entry = s.connections.entry(key(addr, pkg)).or_default();
         if ok {
             entry.success_count = entry.success_count.saturating_add(1);
         } else {
             entry.error_count = entry.error_count.saturating_add(1);
         }
-        if let Some(status) = status {
-            entry.last_status = Some(status);
+        if let Some(st) = status {
+            entry.last_status = Some(st);
         }
-        state.render_tick = state.render_tick.wrapping_add(1);
+        s.render_tick = s.render_tick.wrapping_add(1);
     });
     persist_now();
 }
 
-pub fn persist_now() {
-    let entries = snapshot_apps();
-    persist::save_apps(&entries);
+// ========== 握手管理 ==========
+
+pub fn insert_pending_handshake(addr: &str, pkg: &str, timer_id: u64) -> Option<u64> {
+    with_state(|s| s.pending_handshakes.insert(key(addr, pkg), timer_id))
 }
 
-pub fn set_enabled(pkg_name: &str, enabled: bool) {
-    with_state(|state| {
-        let entry = state
-            .apps
-            .entry(pkg_name.to_string())
-            .or_insert_with(|| AppEntry::new(pkg_name));
-        entry.enabled = enabled;
-        state.render_tick = state.render_tick.wrapping_add(1);
-    });
-    persist_now();
+pub fn take_pending_handshake(addr: &str, pkg: &str) -> Option<u64> {
+    with_state(|s| s.pending_handshakes.remove(&key(addr, pkg)))
 }
 
-pub fn remove_app(pkg_name: &str) {
-    let removed = with_state(|state| {
-        let removed = state.apps.remove(pkg_name).is_some();
-        state.render_tick = state.render_tick.wrapping_add(1);
-        removed
-    });
-    if removed {
-        persist_now();
-    }
+pub fn is_handshake_pending(addr: &str, pkg: &str) -> bool {
+    with_state(|s| s.pending_handshakes.contains_key(&key(addr, pkg)))
 }
 
-pub fn snapshot_apps() -> Vec<AppEntry> {
-    with_state(|state| {
-        let mut list: Vec<AppEntry> = state.apps.values().cloned().collect();
-        list.sort_by(|a, b| a.pkg_name.cmp(&b.pkg_name));
-        list
+pub fn drain_pending_for_device(addr: &str) -> Vec<u64> {
+    with_state(|s| {
+        let keys: Vec<(String, String)> = s
+            .pending_handshakes
+            .keys()
+            .filter(|(a, _)| a == addr)
+            .cloned()
+            .collect();
+        keys.iter()
+            .filter_map(|k| s.pending_handshakes.remove(k))
+            .collect()
     })
 }
 
-pub fn pkg_names() -> Vec<String> {
-    with_state(|state| {
-        let mut list: Vec<String> = state.apps.keys().cloned().collect();
-        list.sort();
-        list
-    })
-}
-
-pub fn set_notice(msg: impl Into<String>) {
-    with_state(|state| {
-        state.last_notice = Some(msg.into());
-        state.render_tick = state.render_tick.wrapping_add(1);
-    });
-}
-
-pub fn clear_notice() {
-    with_state(|state| {
-        state.last_notice = None;
-    });
-}
-
-pub fn set_pending_add(value: String) {
-    with_state(|state| state.pending_add_pkg = value);
-}
-
-pub fn take_pending_add() -> String {
-    with_state(|state| std::mem::take(&mut state.pending_add_pkg))
-}
+// ========== 设备/应用列表 ==========
 
 pub fn set_root(element_id: &str) {
-    with_state(|state| state.root_element_id = Some(element_id.to_string()));
+    with_state(|s| s.root_element_id = Some(element_id.to_string()));
 }
 
 pub fn root() -> Option<String> {
-    with_state(|state| state.root_element_id.clone())
+    with_state(|s| s.root_element_id.clone())
 }
 
 pub fn set_connected_devices(devices: Vec<(String, String)>) {
-    with_state(|state| {
-        state.connected_devices = devices;
-        state.devices_loading = false;
-        state.render_tick = state.render_tick.wrapping_add(1);
+    with_state(|s| {
+        s.connected_devices = devices;
+        s.devices_loading = false;
+        s.render_tick = s.render_tick.wrapping_add(1);
     });
 }
 
 pub fn connected_devices() -> Vec<(String, String)> {
-    with_state(|state| state.connected_devices.clone())
+    with_state(|s| s.connected_devices.clone())
 }
 
 pub fn set_installed_apps(apps: Vec<InstalledApp>) {
-    with_state(|state| {
-        state.installed_apps = apps;
-        state.apps_loading = false;
-        state.render_tick = state.render_tick.wrapping_add(1);
+    with_state(|s| {
+        s.installed_apps = apps;
+        s.apps_loading = false;
+        s.render_tick = s.render_tick.wrapping_add(1);
     });
 }
 
 pub fn installed_apps() -> Vec<InstalledApp> {
-    with_state(|state| state.installed_apps.clone())
-}
-
-pub fn is_monitored(pkg: &str) -> bool {
-    with_state(|state| state.apps.contains_key(pkg))
-}
-
-/// 节流自动刷新：返回true表示允许执行
-pub fn try_claim_auto_refresh(min_interval_ms: u128) -> bool {
-    let now = now_unix_ms();
-    with_state(|state| {
-        if now.saturating_sub(state.last_auto_refresh_ms) < min_interval_ms {
-            return false;
-        }
-        state.last_auto_refresh_ms = now;
-        true
-    })
+    with_state(|s| s.installed_apps.clone())
 }
 
 pub fn set_devices_loading(loading: bool) {
-    with_state(|state| state.devices_loading = loading);
+    with_state(|s| s.devices_loading = loading);
 }
 
 pub fn set_apps_loading(loading: bool) {
-    with_state(|state| state.apps_loading = loading);
+    with_state(|s| s.apps_loading = loading);
 }
 
 pub fn is_devices_loading() -> bool {
-    with_state(|state| state.devices_loading)
+    with_state(|s| s.devices_loading)
 }
 
 pub fn is_apps_loading() -> bool {
-    with_state(|state| state.apps_loading)
+    with_state(|s| s.apps_loading)
 }
 
-pub fn first_device_addr_for(pkg_name: &str) -> Option<String> {
-    with_state(|state| {
-        if let Some(entry) = state.apps.get(pkg_name) {
-            if let Some(addr) = entry.last_addr.clone() {
-                return Some(addr);
-            }
+/// 清理已不在 installed_apps 中的连接
+pub fn prune_stale_connections() {
+    with_state(|s| {
+        let valid: std::collections::HashSet<(String, String)> = s
+            .installed_apps
+            .iter()
+            .map(|a| (a.addr.clone(), a.package_name.clone()))
+            .collect();
+        s.connections.retain(|k, _| valid.contains(k));
+        s.pending_handshakes.retain(|k, _| valid.contains(k));
+    });
+}
+
+// ========== 自动重连设置 ==========
+
+pub fn set_auto_reconnect(enabled: bool) {
+    with_state(|s| {
+        s.auto_reconnect = enabled;
+        s.render_tick = s.render_tick.wrapping_add(1);
+    });
+    persist_now();
+}
+
+pub fn auto_reconnect() -> bool {
+    with_state(|s| s.auto_reconnect)
+}
+
+pub fn reconnect_packages() -> Vec<String> {
+    with_state(|s| s.reconnect_packages.clone())
+}
+
+/// 节流自动刷新：返回 true 表示允许执行一次刷新
+pub fn try_claim_auto_refresh(min_interval_ms: u128) -> bool {
+    let now = now_unix_ms();
+    with_state(|s| {
+        if now.saturating_sub(s.last_auto_refresh_ms) < min_interval_ms {
+            return false;
         }
-        state.connected_devices.first().map(|(a, _)| a.clone())
+        s.last_auto_refresh_ms = now;
+        true
     })
 }
 
@@ -324,4 +311,52 @@ pub fn now_unix_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+// ========== 持久化 ==========
+
+/// 从磁盘恢复设置与待重连包名
+pub fn restore_from_disk(config: persist::OnDiskConfig) {
+    let reconnect_packages: Vec<String> = config
+        .apps
+        .iter()
+        .filter(|a| a.was_connected)
+        .map(|a| a.pkg_name.clone())
+        .collect();
+    with_state(|s| {
+        s.auto_reconnect = config.auto_reconnect;
+        s.reconnect_packages = reconnect_packages;
+    });
+}
+
+/// 生成待持久化的应用列表（当前已连接或有统计的应用，按包名聚合）
+fn snapshot_persisted_apps() -> Vec<PersistedApp> {
+    with_state(|s| {
+        let mut by_pkg: HashMap<String, PersistedApp> = HashMap::new();
+        for ((_addr, pkg), conn) in &s.connections {
+            let entry = by_pkg.entry(pkg.clone()).or_insert(PersistedApp {
+                pkg_name: pkg.clone(),
+                was_connected: false,
+                request_count: 0,
+                success_count: 0,
+                error_count: 0,
+            });
+            entry.request_count += conn.request_count;
+            entry.success_count += conn.success_count;
+            entry.error_count += conn.error_count;
+            if conn.status == AppConnectionStatus::Connected {
+                entry.was_connected = true;
+            }
+        }
+        by_pkg.into_values().collect()
+    })
+}
+
+pub fn persist_now() {
+    let (auto_reconnect, apps) = with_state(|s| (s.auto_reconnect, snapshot_persisted_apps()));
+    persist::save_config(&persist::OnDiskConfig {
+        version: persist::CURRENT_VERSION,
+        auto_reconnect,
+        apps,
+    });
 }

@@ -124,30 +124,40 @@ impl lifecycle::Guest for MyPlugin {
             tracing::info!("register card result: {:?}", result);
         });
 
-        // 恢复已持久化的监听应用
-        let restored = ui::persist::load_apps();
-        let count = restored.len();
-        ui::state::install_loaded_apps(restored);
-        tracing::info!("启动：恢复了 {} 个监听应用", count);
+        // 从磁盘恢复设置（自动重连开关、上次连接的包名、统计数据）
+        let config = ui::persist::load_config();
+        let reconnect_count = config
+            .apps
+            .iter()
+            .filter(|a| a.was_connected)
+            .count();
+        ui::state::restore_from_disk(config);
+        tracing::info!("启动：恢复了 {} 个待重连应用", reconnect_count);
 
-        // 预填充设备和应用缓存，并为已恢复的应用注册接收器
+        // 预填充设备和应用缓存，并按需自动重连
         ui::event_handler::initial_refresh();
     }
 }
 
-/// 渲染状态卡片：显示已连接设备数、已监听应用数、总请求数
+/// 渲染状态卡片：显示已连接设备数、已连接应用数、总请求数
 fn render_status_card(card_id: &str) {
-    use ui::state;
+    use ui::state::{self, AppConnectionStatus};
     let devices = state::connected_devices();
-    let apps = state::snapshot_apps();
-    let enabled_count = apps.iter().filter(|a| a.enabled).count();
-    let total_requests: u64 = apps.iter().map(|a| a.request_count).sum();
+    let connections = state::with_state(|s| {
+        let connected = s
+            .connections
+            .values()
+            .filter(|c| c.status == AppConnectionStatus::Connected)
+            .count();
+        let total_requests: u64 = s.connections.values().map(|c| c.request_count).sum();
+        (connected, total_requests)
+    });
 
     let text = format!(
-        "设备: {} 台  ·  监听: {} 个  ·  总请求: {}",
+        "设备: {} 台  ·  已连接: {} 个  ·  总请求: {}",
         devices.len(),
-        enabled_count,
-        total_requests
+        connections.0,
+        connections.1
     );
     tracing::info!("status card: {}", text);
     crate::astrobox::psys_host::ui_v3::render_to_text_card(card_id, &text);
