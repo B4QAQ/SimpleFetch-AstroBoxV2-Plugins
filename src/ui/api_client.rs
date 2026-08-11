@@ -39,7 +39,7 @@ pub fn execute_request(
     tracing::info!("  method : {}", method);
     tracing::info!("  url    : {}", url);
     tracing::info!("  timeout: {}ms", timeout_ms);
-    tracing::info!("  headers: {}", serde_json::to_string(&headers).unwrap_or_default());
+    tracing::info!("  headers: {}", serde_json::to_string(headers).unwrap_or_default());
     if let Some(b) = body {
         let preview_len = b.len().min(2000);
         match std::str::from_utf8(&b[..preview_len]) {
@@ -51,7 +51,33 @@ pub fn execute_request(
     }
     tracing::info!("=================================");
 
-    let (req, outgoing_body) = build_outgoing_request(method, &parsed, headers, body)?;
+    // 快应用在手表上直连时，@system.fetch 运行时会自动给带 body 的请求加
+    // Content-Type，但通过 SF 桥接时这个自动头不会包含在 headers 里。
+    // 因此当请求带 body 且未声明 Content-Type 时，代理需要补上，
+    // 否则服务器无法解析 body（如 api.b4qaq.cn 返回 500）。
+    let mut owned_headers = headers.clone();
+    if body.map(|b| !b.is_empty()).unwrap_or(false) {
+        let has_ct = owned_headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("content-type"));
+        if !has_ct {
+            let is_json = body
+                .map(|b| {
+                    let first = b.iter().find(|x| !x.is_ascii_whitespace()).copied().unwrap_or(0);
+                    first == b'{' || first == b'['
+                })
+                .unwrap_or(false);
+            let ct = if is_json {
+                "application/json;charset=UTF-8"
+            } else {
+                "application/x-www-form-urlencoded"
+            };
+            tracing::info!("补 Content-Type: {}", ct);
+            owned_headers.insert("Content-Type".to_string(), ct.to_string());
+        }
+    }
+
+    let (req, outgoing_body) = build_outgoing_request(method, &parsed, &owned_headers, body)?;
 
     // 发送请求体（仅当有 body 时才打开写入流）
     if let Some(data) = body {
