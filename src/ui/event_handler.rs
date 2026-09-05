@@ -209,6 +209,11 @@ fn dispatch_sf(addr: &str, pkg: &str, msg_type: &str, status: &str, data: Option
                 handle_sf_request(addr, pkg, d);
             }
         }
+        "SF_DOWNLOAD" => {
+            if let Some(d) = data {
+                handle_sf_download(addr, pkg, d);
+            }
+        }
         "SF_CLOSE_BRIDGE_ACK" => {
             // 快应用确认关闭桥接
             tracing::info!("收到 SF_CLOSE_BRIDGE_ACK: pkg={} addr={}", pkg, addr);
@@ -573,6 +578,112 @@ fn send_error(addr: &str, pkg: &str, id: &str, status_code: u16, error: &str) {
                 "id": id,
                 "statusCode": status_code,
                 "error": error
+            }
+        }),
+    );
+}
+
+// ========== 文件下载（SF_DOWNLOAD / SF_DL_RESPONSE） ==========
+
+/// 下载分片的原始字节大小（base64 编码后约 10.7KB，与互联消息大小限制匹配）
+const DL_CHUNK_BYTES: usize = 8 * 1024;
+
+/// 处理快应用的文件下载请求。下载完整文件后分片回传，快应用侧直接写入本地。
+/// 使用 spawn 后台执行，避免大文件阻塞心跳。
+fn handle_sf_download(addr: &str, pkg: &str, data: Value) {
+    let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let url = match data.get("url").and_then(|v| v.as_str()) {
+        Some(u) => u.to_string(),
+        None => {
+            send_dl_fail(addr, pkg, &id, "下载请求缺少url字段");
+            return;
+        }
+    };
+    let headers = parse_headers(data.get("headers"));
+    let filename = data
+        .get("filename")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    state::record_request(addr, pkg, Some(&url));
+
+    let addr = addr.to_string();
+    let pkg = pkg.to_string();
+
+    wit_bindgen::spawn(async move {
+        // 下载固定用 GET
+        match api_client::execute_request("GET", &url, &headers, None, 60000) {
+            Ok(resp) => {
+                if !(200..300).contains(&resp.status_code) {
+                    let msg = format!("下载失败，HTTP {}", resp.status_code);
+                    tracing::error!("下载失败: id={} {}", id, msg);
+                    state::record_result(&addr, &pkg, false, Some(msg.clone()));
+                    send_dl_fail(&addr, &pkg, &id, &msg);
+                    return;
+                }
+
+                let body = &resp.body;
+                if body.is_empty() {
+                    let msg = "下载内容为空";
+                    tracing::error!("下载失败: id={} {}", id, msg);
+                    state::record_result(&addr, &pkg, false, Some(msg.to_string()));
+                    send_dl_fail(&addr, &pkg, &id, msg);
+                    return;
+                }
+
+                // 原始字节分片，每片独立 base64（快应用侧 decodeBase64 后 append 写入）
+                let total = (body.len() + DL_CHUNK_BYTES - 1) / DL_CHUNK_BYTES;
+                let base64_engine = base64::engine::general_purpose::STANDARD;
+                for i in 0..total {
+                    let start = i * DL_CHUNK_BYTES;
+                    let end = (start + DL_CHUNK_BYTES).min(body.len());
+                    let encoded = base64_engine.encode(&body[start..end]);
+                    let is_first = i == 0;
+                    let is_last = i == total - 1;
+                    send_json(
+                        &addr,
+                        &pkg,
+                        json!({
+                            "type": "SF_DL_RESPONSE",
+                            "status": "OK",
+                            "data": {
+                                "id": id,
+                                "append": !is_first,
+                                "isLast": is_last,
+                                "data": encoded
+                            }
+                        }),
+                    );
+                }
+
+                tracing::info!(
+                    "下载完成: id={} file={} bytes={} chunks={}",
+                    id, filename, body.len(), total
+                );
+                state::record_result(&addr, &pkg, true, Some("下载完成".to_string()));
+            }
+            Err(e) => {
+                tracing::error!("下载异常: id={} err={}", id, e);
+                let msg = classify_network_error(&e);
+                state::record_result(&addr, &pkg, false, Some(msg.clone()));
+                send_dl_fail(&addr, &pkg, &id, &msg);
+            }
+        }
+        crate::ui::build::render_without_auto_refresh();
+    });
+}
+
+fn send_dl_fail(addr: &str, pkg: &str, id: &str, message: &str) {
+    send_json(
+        addr,
+        pkg,
+        json!({
+            "type": "SF_DL_FAIL",
+            "status": message,
+            "data": {
+                "id": id,
+                "message": message
             }
         }),
     );
